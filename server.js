@@ -70,9 +70,14 @@ app.all("*", async (req, res) => {
       res.setHeader(key, value);
     });
 
-    upstream.body.pipe(res);
+    if (upstream.body) {
+      upstream.body.pipe(res);
+    } else {
+      res.end();
+    }
 
   } catch (err) {
+    console.error(err);
     res.status(502).send("Bad Gateway");
   }
 });
