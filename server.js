@@ -1,9 +1,8 @@
-import express from "express";
-import fetch from "node-fetch";
+import http from "http";
+import https from "https";
+import { URL } from "url";
 
-const app = express();
 const PORT = process.env.PORT || 3000;
-
 const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
 
 const STRIP_HEADERS = new Set([
@@ -22,18 +21,19 @@ const STRIP_HEADERS = new Set([
   "x-forwarded-port",
 ]);
 
-app.use(express.raw({ type: "*/*" }));
-
-app.all("*", async (req, res) => {
+const server = http.createServer((req, res) => {
   if (!TARGET_BASE) {
-    return res.status(500).send("TARGET_DOMAIN not set");
+    res.writeHead(500);
+    return res.end("TARGET_DOMAIN not set");
   }
 
   try {
-    const targetUrl = TARGET_BASE + req.originalUrl;
+    const targetUrl = new URL(TARGET_BASE + req.url);
+    const isHttps = targetUrl.protocol === "https:";
+    const client = isHttps ? https : http;
 
-    const headers = {};
     let clientIp = null;
+    const headers = {};
 
     for (const [key, value] of Object.entries(req.headers)) {
       const k = key.toLowerCase();
@@ -56,32 +56,35 @@ app.all("*", async (req, res) => {
 
     if (clientIp) headers["x-forwarded-for"] = clientIp;
 
-    const upstream = await fetch(targetUrl, {
+    const options = {
+      hostname: targetUrl.hostname,
+      port: targetUrl.port || (isHttps ? 443 : 80),
+      path: targetUrl.pathname + targetUrl.search,
       method: req.method,
       headers,
-      body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body,
-      redirect: "manual",
+    };
+
+    const proxyReq = client.request(options, (proxyRes) => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
     });
 
-    res.status(upstream.status);
-
-    upstream.headers.forEach((value, key) => {
-      if (key.toLowerCase() === "transfer-encoding") return;
-      res.setHeader(key, value);
+    proxyReq.on("error", (err) => {
+      console.error("Proxy error:", err);
+      res.writeHead(502);
+      res.end("Bad Gateway");
     });
 
-    if (upstream.body) {
-      upstream.body.pipe(res);
-    } else {
-      res.end();
-    }
+    // 🔥 CRITICAL: stream request directly (no buffering)
+    req.pipe(proxyReq);
 
   } catch (err) {
     console.error(err);
-    res.status(502).send("Bad Gateway");
+    res.writeHead(500);
+    res.end("Internal Error");
   }
 });
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`Relay running on port ${PORT}`);
 });
